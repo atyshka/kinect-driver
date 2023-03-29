@@ -4,11 +4,16 @@
 #include <argparse/argparse.hpp>
 #include <filesystem>
 #include <alsa/asoundlib.h>
+#include <nlohmann/json.hpp>
 
 using namespace Microsoft::CognitiveServices::Speech;
 using namespace Microsoft::CognitiveServices::Speech::Audio;
 using namespace Microsoft::CognitiveServices::Speech::Transcription;
 using namespace std;
+
+const string RED = "\033[0;31m";
+const string GREEN = "\033[0;32m";
+const string YELLOW = "\033[0;33m";
 
 std::string GetEnvironmentVariable(const char* name);
 
@@ -17,26 +22,31 @@ string create_voice_signature(const string& key, const string& region, const str
     string endpoint = "https://signature." + region + ".cts.speech.microsoft.com/api/v1/Signature/GenerateVoiceSignatureFromByteArray";
     // Post the audio file to the endpoint
     cpr::Response r = cpr::Post(cpr::Url{endpoint},
-                                cpr::Header{{"Ocp-Apim-Subscription-Key", key}},
+                                cpr::Header{{"Ocp-Apim-Subscription-Key", key}, {"Content-Type", "application/octet-stream"}},
                                 cpr::Body{cpr::File(wav_file)},
                                 cpr::VerifySsl{false});
+    if (r.status_code != 200) {
+        throw std::runtime_error("Failed to create voice signature");
+    }
+
     // Return the signature 
-    std::cout << r.text << std::endl;
-    return r.text;
+    string signature = nlohmann::json::parse(r.text)["Signature"].dump();
+    std::cout << signature << std::endl;
+    return signature;
 }
 
-string find_azure_kinect()
-{
-    // Loop through all available alsa inputs
-    // print the number of channels for each device
-    // and return the first device with 8 channels
+// string find_azure_kinect()
+// {
+//     // Loop through all available alsa inputs
+//     // print the number of channels for each device
+//     // and return the first device with 8 channels
     
-}
+// }
 
 int main(int argc, char* argv[])
 {
     argparse::ArgumentParser program("multi_user_asr");
-    program.add_argument("--speaker_samples")
+    program.add_argument("--speaker-samples")
         .help("WAV files for each speaker")
         .nargs(argparse::nargs_pattern::any);
 
@@ -61,7 +71,7 @@ int main(int argc, char* argv[])
     }
 
     std::map<std::string, std::string> speaker_signatures;
-    for (auto wav_file : program.get<std::vector<std::string>>("--speaker_samples")) {
+    for (auto wav_file : program.get<std::vector<std::string>>("--speaker-samples")) {
         std::cout << "Generating signature for " << wav_file << std::endl;
         string signature = create_voice_signature(speech_key, speech_region, wav_file);
         string stem = std::filesystem::path(wav_file).stem().string();
@@ -73,40 +83,44 @@ int main(int argc, char* argv[])
     speech_config->SetProperty("ConversationTranscriptionInRoomAndOnline", "true");
     speech_config->SetProperty("DifferentiateGuestSpeakers", "true");
     auto audioProcessingOptions = AudioProcessingOptions::Create(
-        AUDIO_INPUT_PROCESSING_NONE,
+        AUDIO_INPUT_PROCESSING_ENABLE_DEFAULT,
         PresetMicrophoneArrayGeometry::Circular7,
-        SpeakerReferenceChannel::LastChannel);
-    auto audio_config = AudioConfig::FromDefaultMicrophoneInput();
+        SpeakerReferenceChannel::None);
+    auto audio_config = AudioConfig::FromMicrophoneInput("hw:1,0", audioProcessingOptions);
     auto transcriber = Transcription::ConversationTranscriber::FromConfig(audio_config);
-    auto conversation = Transcription::Conversation::CreateConversationAsync(speech_config).get();
+    auto conversation = Transcription::Conversation::CreateConversationAsync(speech_config, "conversation1").get();
 
     promise<void> recognition_end;
     transcriber->Transcribing.Connect([](const ConversationTranscriptionEventArgs& e)
     {
-        cout << "Recognizing:" << e.Result->Text << std::endl;
+        cout << YELLOW << "Recognizing: " << e.Result->Text << "\r" << flush;
     });
     transcriber->Transcribed.Connect([](const ConversationTranscriptionEventArgs& e)
     {
         if (e.Result->Reason == ResultReason::RecognizedSpeech)
         {
-            cout << "Transcribed: Text=" << e.Result->Text << std::endl
-                << "  Offset=" << e.Result->Offset() << std::endl
-                << "  Duration=" << e.Result->Duration() << std::endl
-                << "  UserId=" << e.Result->UserId << std::endl;
+            // cout << "Transcribed: Text=" << e.Result->Text << std::endl
+            //     << "  Offset=" << e.Result->Offset() << std::endl
+            //     << "  Duration=" << e.Result->Duration() << std::endl
+            //     << "  UserId=" << e.Result->UserId << std::endl;
+            if (e.Result->Text.size() == 0) {
+                return;
+            }
+            cout << GREEN << "\033[K" << e.Result->UserId << ": " << e.Result->Text << endl;
         }
         else if (e.Result->Reason == ResultReason::NoMatch)
         {
-            cout << "NOMATCH: Speech could not be recognized." << std::endl;
+            cout << RED << "\033[K" << "NOMATCH: Speech could not be recognized." << endl;
         }
     });
     transcriber->Canceled.Connect([&recognition_end](const ConversationTranscriptionCanceledEventArgs& e)
     {
-        cout << "CANCELED: Reason=" << (int)e.Reason << std::endl;
+        cout << RED << "\033[K" << "CANCELED: Reason=" << (int)e.Reason << endl;
         if (e.Reason == CancellationReason::Error)
         {
             cout << "CANCELED: ErrorCode=" << (int)e.ErrorCode << "\n"
                  << "CANCELED: ErrorDetails=" << e.ErrorDetails << "\n"
-                 << "CANCELED: Did you set the speech resource key and region values?" << std::endl;
+                 << "CANCELED: Did you set the speech resource key and region values?" << endl;
 
             recognition_end.set_value(); // Notify to stop recognition.
         }
